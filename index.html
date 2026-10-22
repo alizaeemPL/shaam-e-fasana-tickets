@@ -1,0 +1,230 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shaam-e-Fasana | Ticket Check-in</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://unpkg.com/html5-qrcode"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 560px;
+      margin: 30px auto;
+      padding: 20px;
+      background: #f5f6fa;
+      color: #202331;
+    }
+    .panel {
+      background: white;
+      padding: 22px;
+      border-radius: 14px;
+      box-shadow: 0 3px 16px #0001;
+    }
+    h1 { font-size: 25px; }
+    input, button {
+      box-sizing: border-box;
+      width: 100%;
+      padding: 12px;
+      margin-top: 10px;
+      border-radius: 8px;
+      font-size: 16px;
+    }
+    input { border: 1px solid #bbb; }
+    button {
+      border: 0;
+      background: #273c75;
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled { opacity: .55; }
+    #scanner { margin-top: 18px; }
+    #result {
+      margin-top: 18px;
+      padding: 14px;
+      border-radius: 8px;
+      overflow-wrap: anywhere;
+    }
+    .good { background: #d8f5df; color: #14532d; }
+    .bad { background: #ffe0e0; color: #991b1b; }
+    .hidden { display: none; }
+    .muted { color: #666; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="panel">
+    <h1>Shaam-e-Fasana</h1>
+    <p>Event ticket check-in</p>
+
+    <section id="login">
+      <h2>Volunteer login</h2>
+      <input id="email" type="email" placeholder="Volunteer email"
+             autocomplete="username">
+      <input id="password" type="password" placeholder="Password"
+             autocomplete="current-password">
+      <button id="loginBtn">Sign in</button>
+      <p class="muted">Use the volunteer account created in Supabase.</p>
+    </section>
+
+    <section id="checkin" class="hidden">
+      <p id="signedIn"></p>
+      <button id="startBtn">Start QR scanner</button>
+      <button id="stopBtn">Stop scanner</button>
+      <div id="scanner"></div>
+      <div id="result" role="status" aria-live="polite"></div>
+      <button id="logoutBtn">Sign out</button>
+    </section>
+  </div>
+
+<script>
+  // Replace these two placeholders with your own project details.
+  const SUPABASE_URL = "https://rywkwyzhvzjazmkhxclz.supabase.co";
+  const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_fAHnDt8rHcAYzXfG7UAOWg_blU8vIdJ";
+
+  const db = window.supabase.createClient(
+    SUPABASE_URL,
+    SUPABASE_PUBLISHABLE_KEY
+  );
+
+  const $ = id => document.getElementById(id);
+  let scanner = null;
+  let busy = false;
+  let lastCode = "";
+  let lastScanTime = 0;
+
+  function showResult(message, success) {
+    $("result").textContent = message;
+    $("result").className = success ? "good" : "bad";
+  }
+
+  function showSignedIn(user) {
+    $("login").classList.add("hidden");
+    $("checkin").classList.remove("hidden");
+    $("signedIn").textContent = "Signed in: " + user.email;
+  }
+
+  async function refreshSession() {
+    const { data, error } = await db.auth.getSession();
+    if (error) {
+      showResult(error.message, false);
+      return;
+    }
+
+    if (data.session) showSignedIn(data.session.user);
+    else {
+      $("login").classList.remove("hidden");
+      $("checkin").classList.add("hidden");
+    }
+  }
+
+  $("loginBtn").addEventListener("click", async () => {
+    const email = $("email").value.trim();
+    const password = $("password").value;
+
+    if (!email || !password) {
+      alert("Enter your email and password.");
+      return;
+    }
+
+    $("loginBtn").disabled = true;
+    const { data, error } = await db.auth.signInWithPassword({
+      email, password
+    });
+    $("loginBtn").disabled = false;
+
+    if (error) {
+      alert("Sign-in failed: " + error.message);
+      return;
+    }
+
+    showSignedIn(data.user);
+  });
+
+  async function stopScanner() {
+    if (scanner) {
+      try {
+        if (scanner.isScanning) await scanner.stop();
+        scanner.clear();
+      } catch (e) {
+        console.warn("Scanner stop:", e);
+      }
+      scanner = null;
+    }
+  }
+
+  async function checkTicket(decodedText) {
+    if (busy) return;
+
+    // Avoid repeated camera callbacks for the same visible QR.
+    const now = Date.now();
+    if (decodedText === lastCode && now - lastScanTime < 2500) return;
+    lastCode = decodedText;
+    lastScanTime = now;
+    busy = true;
+
+    try {
+      const { data, error } = await db.rpc("check_in_ticket", {
+        p_ticket_code: decodedText
+      });
+
+      if (error) {
+        showResult("CHECK-IN ERROR: " + error.message, false);
+      } else if (data.status === "valid") {
+        showResult("VALID — TICKET ACCEPTED: " + data.ticket_code, true);
+      } else if (data.status === "already_used") {
+        showResult("ALREADY USED — DO NOT ADMIT", false);
+      } else {
+        showResult("INVALID TICKET — DO NOT ADMIT", false);
+      }
+    } catch (e) {
+      showResult("Network error. Check the internet and try again.", false);
+    } finally {
+      busy = false;
+    }
+  }
+
+  $("startBtn").addEventListener("click", async () => {
+    if (scanner) return;
+
+    showResult("Starting camera…", true);
+    scanner = new Html5Qrcode("scanner");
+
+    try {
+      await scanner.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 250, height: 250 } },
+        checkTicket,
+        () => {}
+      );
+      showResult("Scanner ready. Point it at a ticket QR code.", true);
+    } catch (e) {
+      scanner = null;
+      showResult(
+        "Could not open camera. Allow camera access and use the published HTTPS website. " + e,
+        false
+      );
+    }
+  });
+
+  $("stopBtn").addEventListener("click", stopScanner);
+
+  $("logoutBtn").addEventListener("click", async () => {
+    await stopScanner();
+    const { error } = await db.auth.signOut();
+    if (error) alert(error.message);
+    await refreshSession();
+  });
+
+  db.auth.onAuthStateChange((_event, session) => {
+    if (session) showSignedIn(session.user);
+    else {
+      $("login").classList.remove("hidden");
+      $("checkin").classList.add("hidden");
+    }
+  });
+
+  refreshSession();
+</script>
+</body>
+</html>
