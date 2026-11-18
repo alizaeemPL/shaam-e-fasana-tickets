@@ -90,8 +90,9 @@
   const $ = id => document.getElementById(id);
   let scanner = null;
   let busy = false;
-  let lastCode = "";
-  let lastScanTime = 0;
+  let qrLocked = false;
+  let qrClearTimer = null;
+  const QR_CLEAR_DELAY = 3000;
 
   function showResult(message, success) {
     $("result").textContent = message;
@@ -154,14 +155,16 @@
   }
 
   async function checkTicket(decodedText) {
-    if (busy) return;
+    if (qrLocked || busy) return;
 
-    // Avoid repeated camera callbacks for the same visible QR.
-    const now = Date.now();
-    if (decodedText === lastCode && now - lastScanTime < 2500) return;
-    lastCode = decodedText;
-    lastScanTime = now;
+    qrLocked = true;
     busy = true;
+
+    // Cancel any QR-clear timer
+    if (qrClearTimer) {
+      clearTimeout(qrClearTimer);
+      qrClearTimer = null;
+    }
 
     try {
       const { data, error } = await db.rpc("check_in_ticket", {
@@ -192,11 +195,30 @@
 
     try {
       await scanner.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
-        checkTicket,
-        () => {}
-      );
+  { facingMode: "environment" },
+  { fps: 10, qrbox: { width: 250, height: 250 } },
+
+  // QR detected
+  (decodedText) => {
+    if (qrLocked && qrClearTimer) {
+      clearTimeout(qrClearTimer);
+      qrClearTimer = null;
+    }
+
+    checkTicket(decodedText);
+  },
+
+  // QR not detected in this camera frame
+  () => {
+    if (qrLocked && !qrClearTimer) {
+      qrClearTimer = setTimeout(() => {
+        qrLocked = false;
+        qrClearTimer = null;
+      }, QR_CLEAR_DELAY);
+    }
+  }
+);
+
       showResult("Scanner ready. Point it at a ticket QR code.", true);
     } catch (e) {
       scanner = null;
